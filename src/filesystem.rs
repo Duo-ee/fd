@@ -55,6 +55,9 @@ fn strip_verbatim_prefix(path: &Path) -> PathBuf {
 
     let has_root = matches!(components.clone().next(), Some(Component::RootDir));
     let mut base = OsString::new();
+    // `Prefix::Disk` / `Prefix::UNC` cannot rebuild this prefix: a `Prefix` is a
+    // parse label, not the bytes of the path, and `PrefixComponent` has no stable
+    // constructor. Writing it out by hand is the only way to drop `\\?\`.
     match prefix.kind() {
         Prefix::VerbatimDisk(drive) => {
             base.push(format!("{}:", drive as char));
@@ -76,14 +79,19 @@ fn strip_verbatim_prefix(path: &Path) -> PathBuf {
         _ => return path.to_path_buf(),
     }
 
-    let mut stripped = PathBuf::from(base);
-    for component in components {
-        if component == Component::RootDir {
-            continue;
-        }
-        stripped.push(component.as_os_str());
+    if has_root {
+        // The root separator is already part of `base`, and `join` would append
+        // it again; skipping the root component keeps the prefix we just built
+        // instead of letting `join` replace it.
+        let _ = components.next();
     }
-    stripped
+    if components.as_path().is_empty() {
+        // `\\?\C:` and `\\?\UNC\server\share`: the verbatim form is the whole
+        // path, and joining an empty tail would append a separator the input
+        // did not have.
+        return PathBuf::from(base);
+    }
+    Path::new(&base).join(components)
 }
 
 pub fn is_existing_directory(path: &Path) -> bool {
@@ -236,6 +244,14 @@ mod windows_tests {
         assert_eq!(
             strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share")),
             Path::new(r"\\server\share")
+        );
+        // ... and keeps the exact bytes: joining an empty tail would have
+        // appended a separator the input did not have.
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share"))
+                .as_os_str()
+                .as_encoded_bytes(),
+            Path::new(r"\\server\share").as_os_str().as_encoded_bytes()
         );
         assert_eq!(
             strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share\")),
